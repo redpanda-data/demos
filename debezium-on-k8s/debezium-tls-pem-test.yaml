@@ -1,0 +1,227 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: debezium-example
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: debezium-secret
+  namespace: debezium-example
+type: Opaque
+data:
+  username: ZGViZXppdW0=
+  password: ZGJ6
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: connector-configuration-role
+  namespace: debezium-example
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["debezium-secret"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: connector-configuration-role-binding
+  namespace: debezium-example
+subjects:
+  - kind: ServiceAccount
+    name: debezium-connect-cluster-connect
+    namespace: debezium-example
+roleRef:
+  kind: Role
+  name: connector-configuration-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: debezium-example
+spec:
+  ports:
+  - port: 3306
+  selector:
+    app: mysql
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: debezium-example
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - image: quay.io/debezium/example-mysql:1.9
+        name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: debezium
+        - name: MYSQL_USER
+          value: mysqluser
+        - name: MYSQL_PASSWORD
+          value: mysqlpw
+        ports:
+        - containerPort: 3306
+          name: mysql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+  namespace: debezium-example
+spec:
+  selector:
+    matchLabels:
+      app: kafka-connect
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: kafka-connect
+    spec:
+      containers:
+      - image: quay.io/debezium/connect:latest
+        name: connect
+#        tty: true
+#        stdin: true
+#        command:
+#        - /bin/bash
+        env:
+        - name: KAFKA_OPTS
+          value: "-Djavax.net.debug=all -Djavax.net.ssl.trustStore=trustStore"
+        - name: GROUP_ID
+          value: "1"
+        - name: CONFIG_STORAGE_TOPIC
+          value: my_connect_configs
+        - name: OFFSET_STORAGE_TOPIC
+          value: my_connect_offsets
+        - name: STATUS_STORAGE_TOPIC
+          value: my_connect_statuses
+        - name: BOOTSTRAP_SERVERS
+          value: cluster-sample-tls-0.cluster-sample-tls.debezium-example.svc.cluster.local:9092
+        - name: CONNECT_SSL_TRUSTSTORE_LOCATION
+          value: "/redpanda/ca.crt"
+        - name: CONNECT_SSL_TRUSTSTORE_TYPE
+          value: "PEM"
+        - name: CONNECT_CONSUMER_SSL_TRUSTSTORE_LOCATION
+          value: "/redpanda/ca.crt"
+        - name: CONNECT_CONSUMER_SSL_TRUSTSTORE_TYPE
+          value: "PEM"
+        - name: CONNECT_CONSUMER_BOOTSTRAP_SERVERS
+          value: cluster-sample-tls-0.cluster-sample-tls.debezium-example.svc.cluster.local:9092
+        - name: CONNECT_CONSUMER_SECURITY_PROTOCOL
+          value: SSL
+        - name: CONNECT_PRODUCER_SSL_TRUSTSTORE_LOCATION
+          value: "/redpanda/ca.crt"
+        - name: CONNECT_PRODUCER_SSL_TRUSTSTORE_TYPE
+          value: "PEM"
+        - name: CONNECT_PRODUCER_BOOTSTRAP_SERVERS
+          value: cluster-sample-tls-0.cluster-sample-tls.debezium-example.svc.cluster.local:9092
+        - name: CONNECT_PRODUCER_SECURITY_PROTOCOL
+          value: SSL
+        - name: CONNECT_SECURITY_PROTOCOL
+          value: SSL
+        ports:
+        - containerPort: 8083
+          name: mysql
+        volumeMounts:
+          - name: redpanda-keystore
+            mountPath: "/redpanda"
+            readOnly: true
+      volumes:
+        - name: redpanda-keystore
+          secret:
+            secretName: cluster-sample-tls-redpanda
+---
+apiVersion: redpanda.vectorized.io/v1alpha1
+kind: Cluster
+metadata:
+  name: cluster-sample-tls
+  namespace: debezium-example
+spec:
+  image: "vectorized/redpanda"
+  version: "latest"
+  replicas: 1
+  resources:
+    requests:
+      cpu: 1
+      memory: 1.2G
+    limits:
+      cpu: 1
+      memory: 1.2G
+  configuration:
+    rpcServer:
+      port: 33145
+    kafkaApi:
+      - port: 9092
+        tls:
+          enabled: true
+    pandaproxyApi:
+      - port: 8082
+        tls:
+          enabled: true
+    schemaRegistry:
+      port: 8081
+      tls:
+        enabled: true
+    adminApi:
+      - port: 9644
+        tls:
+          enabled: true
+    developerMode: true
+  dnsTrailingDotDisabled: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rpk-test
+  namespace: debezium-example
+spec:
+  selector:
+    matchLabels:
+      app: rpk-test
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: rpk-test
+    spec:
+      containers:
+      - name: rpk
+        image: vectorized/redpanda:latest
+        env:
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        command:
+          - /bin/bash
+        tty: true
+        stdin: true
+        volumeMounts:
+          - name: redpanda-keystore
+            mountPath: "/redpanda"
+            readOnly: true
+      volumes:
+        - name: redpanda-keystore
+          secret:
+            secretName: cluster-sample-tls-redpanda
